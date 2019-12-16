@@ -1,0 +1,4 @@
+/**/*.ini.bak
+/**/*.ini
+/**/*.ipynb
+/**/data/
