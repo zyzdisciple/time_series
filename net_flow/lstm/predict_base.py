@@ -43,6 +43,9 @@ def split_sequence(sequence, n_steps):
 		y.append(seq_y)
 	return np.array(X), np.array(y)
 
+'''
+基本的LSTM
+'''
 def predict(series, n_steps=7, n_features=1):
     X, y = split_sequence(series.values, n_steps)
     
@@ -109,7 +112,7 @@ def cnn_predict(series, n_steps=8, n_features=1, n_seq=2):
     model.compile(optimizer='adam', loss='mse')
     
     # fit model
-    model.fit(X_train, y_train, epochs=500, verbose=0)
+    model.fit(X_train, y_train, epochs=600, verbose=0)
     # demonstrate prediction
     y_hat_list = list()
     y_test_list = list()
