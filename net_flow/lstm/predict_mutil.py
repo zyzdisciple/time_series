@@ -29,10 +29,7 @@ def _load_dataset(file_path, col_to_predict, header_row_index=None,
     """
     # read dataset from disk
     dataset = pd.read_csv(file_path, header=header_row_index, 
-                          index_col=index_col_name,
-                          # bool, default False
-                          #If the parsed data only contains one column then return a Series.
-                          squeeze=True)
+                          index_col=index_col_name)
     
     # drop unused colums
     if cols_to_drop:
@@ -325,7 +322,7 @@ def main():
                                                                       train_percentage)
      
     n_neurons=50
-    n_batch=None
+    n_batch=1
     n_epochs=600
     is_stateful=False
     has_memory_stack=False
