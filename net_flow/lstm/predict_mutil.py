@@ -9,6 +9,7 @@ import numpy as np
 from keras.models import Sequential
 from keras.layers import LSTM
 from keras.layers import Dense
+from keras.regularizers import L1L2
 import matplotlib.pyplot as plt
 from sklearn.metrics import mean_squared_error
 from math import sqrt, floor
@@ -61,7 +62,7 @@ def _scale_dataset(values, scale_range):
     scale_range: scale range to fit data in
     """
     # normalize features
-    scaler = MinMaxScaler(feature_range=scale_range or (0, 1))
+    scaler = MinMaxScaler(feature_range=scale_range or (-1, 1))
     scaled = scaler.fit_transform(values)
  
     return (scaler, scaled)
@@ -126,6 +127,8 @@ def _split_data_to_train_test_sets(values, n_intervals, n_features,
     #ceil(x)->得到最接近的一个不大于x的整数, 防止 test中数据为0, 如floor(2.9)=2
     n_train_intervals = floor(values.shape[0] * train_percentage) #
     train = values[:n_train_intervals, :]
+    n_val_intervals = floor(train.shape[0] * train_percentage)
+    val = train[n_val_intervals:, :]
     test = values[n_train_intervals:, :]
  
     # split into input and outputs
@@ -133,22 +136,27 @@ def _split_data_to_train_test_sets(values, n_intervals, n_features,
     #train_Y直接赋值倒数第六列，刚好是t + n_out_timestep-1时刻的0号要预测列
     #train_X此时的shape为[train.shape[0], timesteps * features]
     train_X, train_y = train[:, :n_obs], train[:, -n_features]  
+    
+    val_X, val_y = val[:, :n_obs], val[:, -n_features]  
                                                                 
     #print('before reshape\ntrain_X shape:', train_X.shape)
     test_X, test_y = test[:, :n_obs], test[:, -n_features]
  
     # reshape input to be 3D [samples, timesteps, features]
     train_X = train_X.reshape((train_X.shape[0], n_intervals, n_features))
+    val_X = val_X.reshape((val_X.shape[0], n_intervals, n_features))
     test_X = test_X.reshape((test_X.shape[0], n_intervals, n_features))
  
     if verbose:
         print("")
         print("train_X shape:", train_X.shape)
         print("train_y shape:", train_y.shape)
+        print("val_X shape:", val_X.shape)
+        print("val_y shape:", val_y.shape)
         print("test_X shape:", test_X.shape)
         print("test_y shape:", test_y.shape)
  
-    return (train_X, train_y, test_X, test_y)
+    return (train_X, train_y, val_X, val_y, test_X, test_y)
 
 
 """
@@ -158,13 +166,31 @@ def _create_model(train_X, train_y, test_X, test_y, n_neurons=20,
  loss_function='mse', optimizer_function='adam', draw_loss_plot=True,
  output_col_name, verbose=True):
 """
-def _create_model(train_X, train_y, test_X, test_y, n_neurons,
-                  n_batch, n_epochs, is_stateful, has_memory_stack,
-                  loss_function, optimizer_function, activation,
-                  output_col_name, draw_loss_plot=True, verbose=True):
+def _create_model(train_X, train_y, 
+                  val_X,
+                  val_y, 
+                  test_X,
+                  test_y, 
+                  n_neurons,
+                  n_batch, 
+                  n_epochs, 
+                  is_stateful, 
+                  has_memory_stack,
+                  loss_function,
+                  optimizer_function, 
+                  activation,
+                  bias_reg,
+                  kernel_reg,
+                  rnn_reg,
+                  output_col_name,
+                  draw_loss_plot=True, 
+                  unroll=False, 
+                  verbose=True):
     """
     train_X: train inputs
     train_y: train targets
+    val_X: validation targets
+    val_y: validation targets
     test_X: test inputs
     test_y: test targets
     n_neurons: number of neurons for LSTM nn, units
@@ -175,11 +201,12 @@ def _create_model(train_X, train_y, test_X, test_y, n_neurons,
     loss_function: the model loss function evaluator
     optimizer_function: the loss optimizer function
     activation: 激活函数, 默认是 tanh
+    bias_reg: 遗忘门的 bias 正则化.
     draw_loss_plot: whether to draw the loss history plot
     output_col_name: name of the output/target column to be predicted
     verbose: whether to output some debug data
     """
- 
+    
     # design network
     model = Sequential()
  
@@ -192,16 +219,28 @@ def _create_model(train_X, train_y, test_X, test_y, n_neurons,
                 n_batch = i
                 break
  
-        model.add(LSTM(n_neurons, activation=activation, batch_input_shape=(n_batch, train_X.shape[1], train_X.shape[2]), stateful=True, return_sequences=has_memory_stack))
-        if has_memory_stack:
-            model.add(LSTM(n_neurons, activation=activation, batch_input_shape=(n_batch, train_X.shape[1], train_X.shape[2]), stateful=True))
+        model.add(LSTM(n_neurons, activation=activation, 
+                       batch_input_shape=(n_batch, train_X.shape[1], train_X.shape[2]),
+                       stateful=True, 
+                       return_sequences=has_memory_stack, 
+                       bias_regularizer=bias_reg,
+                       kernel_regularizer=kernel_reg,
+                       recurrent_regularizer=rnn_reg,
+                       unroll=unroll
+                       ))
     else:
-        model.add(LSTM(n_neurons, activation=activation, input_shape=(train_X.shape[1], train_X.shape[2])))
+        model.add(LSTM(n_neurons, activation=activation,
+                       input_shape=(train_X.shape[1], train_X.shape[2]),
+                       bias_regularizer=bias_reg,
+                       kernel_regularizer=kernel_reg,
+                       recurrent_regularizer=rnn_reg,
+                       unroll=unroll
+                       ))
  
     model.add(Dense(1))
- 
-    model.compile(loss=loss_function, optimizer=optimizer_function)
- 
+
+    model.compile(optimizer=optimizer_function, loss=loss_function)
+
     if verbose:
         print("")
  
@@ -211,7 +250,7 @@ def _create_model(train_X, train_y, test_X, test_y, n_neurons,
     if is_stateful:
         for i in range(n_epochs):
             history = model.fit(train_X, train_y, epochs=1, batch_size=n_batch, 
-                                validation_data=(test_X, test_y), verbose=0, shuffle=False)
+                                validation_data=(val_X, val_y), verbose=0, shuffle=False)
  
             if verbose:
                 print("Epoch %d/%d" % (i + 1, n_epochs))
@@ -223,16 +262,17 @@ def _create_model(train_X, train_y, test_X, test_y, n_neurons,
             model.reset_states()
     else:
         history = model.fit(train_X, train_y, epochs=n_epochs, batch_size=n_batch, 
-                            validation_data=(test_X, test_y), verbose=2 if verbose else 0, shuffle=False)
+                            validation_data=(val_X, val_y), verbose=2 if verbose else 0, shuffle=False)
     
     
     if draw_loss_plot:
+        plt.figure()
         plt.plot(history.history["loss"] if not is_stateful else losses, label="Train Loss (%s)" % output_col_name)
         plt.plot(history.history["val_loss"] if not is_stateful else val_losses, label="Test Loss (%s)" % output_col_name)
         plt.legend()
-        plt.show()
     
-    print(history.history)
+    if verbose: 
+        print(history.history)
     #model.save('./my_model_%s.h5'%datetime.datetime.now())
     return (model, n_batch)
 
@@ -240,7 +280,8 @@ def _create_model(train_X, train_y, test_X, test_y, n_neurons,
 #def _make_prediction(model, train_X, train_y, test_X, test_y, compatible_n_batch, n_intervals=3, n_features, scaler=(0,1), draw_prediction_fit_plot=True, output_col_name, verbose=True):
 def _make_prediction(model, train_X, train_y, test_X, test_y, 
                      compatible_n_batch, n_intervals, n_features, 
-                     scaler, output_col_name, draw_prediction_fit_plot=True, verbose=True):
+                     scaler, output_col_name,
+                     draw_prediction_fit_plot=True, verbose=True):
     """
     train_X: train inputs
     train_y: train targets
@@ -316,48 +357,65 @@ def main():
     #print('\nagg1\n', agg1)
     
     train_percentage = 0.9
-    train_X, train_Y, test_X, test_Y = _split_data_to_train_test_sets(agg.values, 
+    train_X, train_Y, val_X, val_y, test_X, test_Y = _split_data_to_train_test_sets(agg.values, 
                                                                       n_in_timestep, 
                                                                       n_features, 
                                                                       train_percentage)
-     
+    
     n_neurons=50
     n_batch=1
-    n_epochs=600
+    n_epochs=500
     is_stateful=False
     has_memory_stack=False
     loss_function='mse'
     optimizer_function='adam'
     activation='relu'
-    model, compatible_n_batch = _create_model(train_X, train_Y,
-                                              test_X,
-                                              test_Y,
-                                              n_neurons,
-                                              n_batch,
-                                              n_epochs,
-                                              is_stateful,
-                                              has_memory_stack,
-                                              loss_function,
-                                              optimizer_function,
-                                              activation,
-                                              output_col_name,
-                                              False,
-                                              False)
+    draw_loss_plot=True
     
+    bias_regs = [L1L2(l1=0.0, l2=0.0), L1L2(l1=0.0, l2=0.05)]
+    kernel_regs = [L1L2(l1=0.0, l2=0.0), L1L2(l1=0.03, l2=0.0)]
+    rnn_regs = [L1L2(l1=0.0, l2=0.0), L1L2(l1=0.1, l2=0.0)]
     
-    test_X = np.concatenate((train_X, test_X), axis = 0)
-    test_Y = np.concatenate((train_Y, test_Y), axis = 0)
-    # test_Y = train_Y.append(test_Y)
-    actual_target, predicted_target, \
-        error_value, error_percentage = _make_prediction(model, train_X, 
-                                                         train_Y, 
-                                                         test_X, 
-                                                         test_Y, 
-                                                         compatible_n_batch, 
-                                                         n_in_timestep, 
-                                                         n_features, 
-                                                         scaler,  
-                                                         output_col_name)
+    for reg in range(0, 1):
+        bias_reg = None
+        kernel_reg = None
+        rnn_reg = rnn_regs[1]
+        model, compatible_n_batch = _create_model(train_X, train_Y,
+                                                  val_X,
+                                                  val_y,
+                                                  test_X,
+                                                  test_Y,
+                                                  n_neurons,
+                                                  n_batch,
+                                                  n_epochs,
+                                                  is_stateful,
+                                                  has_memory_stack,
+                                                  loss_function,
+                                                  optimizer_function,
+                                                  activation,
+                                                  bias_reg,
+                                                  kernel_reg,
+                                                  rnn_reg,
+                                                  output_col_name,
+                                                  draw_loss_plot,
+                                                  verbose=False,
+                                                  unroll=True)
+        
+        
+        test_X = np.concatenate((train_X, test_X), axis = 0)
+        test_Y = np.concatenate((train_Y, test_Y), axis = 0)
+        # test_Y = train_Y.append(test_Y)
+        actual_target, predicted_target, \
+            error_value, error_percentage = _make_prediction(model, train_X, 
+                                                             train_Y, 
+                                                             test_X, 
+                                                             test_Y, 
+                                                             compatible_n_batch, 
+                                                             n_in_timestep, 
+                                                             n_features, 
+                                                             scaler,  
+                                                             output_col_name,
+                                                             verbose=True)
     
     #model.save('./my_model_%s.h5'%datetime.datetime.now())
     # model.save('./my_model_in time step_%d_out_timestep_%d.h5'%n_in_timestep%n_out_timestep)
