@@ -40,7 +40,7 @@ def equals_one():
     return data
 
 data = src_data().values
-# data = random_data()
+data = random_data()
 # data = equals_one()
 print(data)
 result = sp.stats.kstest(data, 'norm')
